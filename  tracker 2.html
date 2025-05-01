@@ -1,0 +1,389 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tracking Link Converter with Redirect</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    margin: 2rem;
+    background: #f9f9f9;
+    color: #333;
+  }
+  h1 {
+    text-align: center;
+  }
+  .container {
+    max-width: 700px;
+    margin: 0 auto;
+    background: white;
+    padding: 1.5rem;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    border-radius: 8px;
+  }
+  .btn {
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 0.6em 1.2em;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .btn:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+  }
+  input[type="text"], input[type="url"] {
+    width: 100%;
+    padding: 0.4em;
+    font-size: 1em;
+    margin-top: 0.5em;
+    margin-bottom: 1em;
+    box-sizing: border-box;
+  }
+  label {
+    font-weight: bold;
+  }
+  .tracking-link {
+    word-break: break-all;
+    background: #eef6ff;
+    padding: 0.5em;
+    border-radius: 4px;
+    margin-bottom: 1em;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1em;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 0.5em;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background-color: #eee;
+  }
+  .location-data {
+    font-size: 0.9em;
+    color: #555;
+  }
+  .message {
+    margin-top: 1em;
+    font-style: italic;
+  }
+  a.copy-btn {
+    background-color: #28a745;
+    color: white;
+    padding: 0.2em 0.5em;
+    border-radius: 4px;
+    cursor: pointer;
+    text-decoration: none;
+    margin-left: 0.5em;
+    font-size: 0.9em;
+  }
+  .footer {
+    margin-top: 2em;
+    font-size: 0.9em;
+    color: #777;
+    text-align: center;
+  }
+  .error {
+    color: red;
+    font-weight: bold;
+  }
+</style>
+</head>
+<body>
+<div class="container" id="mainContainer">
+  <h1>Tracking Link Converter</h1>
+  <div id="creatorView" style="display:none;">
+    <p>Enter the URL you want to track, then create a tracking link. When visitors open the tracking link, their location will be recorded and they will be redirected to your original link.</p>
+    <label for="destinationUrlInput">Enter Destination URL:</label>
+    <input type="url" id="destinationUrlInput" placeholder="https://example.com" required />
+    <button class="btn" id="createLinkBtn">Create Tracking Link</button>
+    <p id="inputError" class="error" style="display:none;"></p>
+    <div id="newLinkContainer" style="margin-top:1em;"></div>
+    <h2>Tracked Links & Visitors</h2>
+    <div id="trackedLinksList">
+      <p class="message">No tracking links created yet.</p>
+    </div>
+  </div>
+
+  <div id="trackerView" style="display:none;">
+    <h1>Tracking Link</h1>
+    <p>This link will get your location if you allow it, then redirect you.</p>
+    <p id="statusMessage">Requesting location...</p>
+  </div>
+</div>
+
+<script>
+(function(){
+  // Utility: generate random ID for link
+  function generateId(length = 10) {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let id = '';
+    for(let i = 0; i < length; i++) {
+      id += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return id;
+  }
+  // Base URL without query params
+  const baseUrl = location.origin + location.pathname;
+
+  // LocalStorage keys and data structure:
+  // trackingLinks = { id: { created: timestamp, destinationUrl: string, visits: [{timestamp, lat, lng, accuracy}] } }
+  function loadTrackingLinks() {
+    try {
+      const raw = localStorage.getItem('trackingLinks');
+      return raw ? JSON.parse(raw) : {};
+    } catch(e) {
+      return {};
+    }
+  }
+  function saveTrackingLinks(data) {
+    localStorage.setItem('trackingLinks', JSON.stringify(data));
+  }
+
+  // View Elements
+  const creatorView = document.getElementById('creatorView');
+  const trackerView = document.getElementById('trackerView');
+  const createLinkBtn = document.getElementById('createLinkBtn');
+  const newLinkContainer = document.getElementById('newLinkContainer');
+  const trackedLinksList = document.getElementById('trackedLinksList');
+  const statusMessage = document.getElementById('statusMessage');
+  const destinationUrlInput = document.getElementById('destinationUrlInput');
+  const inputError = document.getElementById('inputError');
+
+  // Parse URL params to detect if tracking mode
+  const urlParams = new URLSearchParams(window.location.search);
+  const trackingId = urlParams.get('id');
+
+  function humanDate(ts) {
+    return new Date(ts).toLocaleString();
+  }
+
+  // Validate URL format
+  function isValidUrl(url) {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  //-----------------------------
+  // Tracker View (when ?id= is present)
+  //-----------------------------
+  function runTracker(id) {
+    creatorView.style.display = 'none';
+    trackerView.style.display = 'block';
+
+    const links = loadTrackingLinks();
+    const trackingInfo = links[id];
+
+    if (!trackingInfo) {
+      statusMessage.textContent = 'Invalid tracking link.';
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      statusMessage.textContent = 'Geolocation is not supported by your browser. Redirecting...';
+      redirectToDestination(trackingInfo.destinationUrl);
+      return;
+    }
+
+    function saveVisit(position) {
+      let links = loadTrackingLinks();
+      if (!links[id]) {
+        // Should not happen, but create if missing
+        links[id] = { created: Date.now(), destinationUrl: trackingInfo.destinationUrl, visits: [] };
+      }
+      links[id].visits.push({
+        timestamp: Date.now(),
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy
+      });
+      saveTrackingLinks(links);
+    }
+
+    function redirectToDestination(url) {
+      // Wait 2 seconds to let user read message, then redirect
+      setTimeout(() => {
+        window.location.href = url;
+      }, 2000);
+    }
+
+    function errorHandler(err) {
+      switch(err.code) {
+        case err.PERMISSION_DENIED:
+          statusMessage.textContent = 'Location permission denied. Redirecting...';
+          break;
+        case err.POSITION_UNAVAILABLE:
+          statusMessage.textContent = 'Location information is unavailable. Redirecting...';
+          break;
+        case err.TIMEOUT:
+          statusMessage.textContent = 'The request to get your location timed out. Redirecting...';
+          break;
+        default:
+          statusMessage.textContent = 'An unknown error occurred. Redirecting...';
+          break;
+      }
+      redirectToDestination(trackingInfo.destinationUrl);
+    }
+
+    statusMessage.textContent = 'Requesting location...';
+
+    navigator.geolocation.getCurrentPosition(function(position) {
+      saveVisit(position);
+      statusMessage.textContent = 'Thank you! Your location has been recorded. Redirecting...';
+      redirectToDestination(trackingInfo.destinationUrl);
+    }, errorHandler, { timeout: 10000 });
+  }
+
+  //-----------------------------
+  // Creator view functions
+  //-----------------------------
+  function copyToClipboard(text) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => {
+        alert('Link copied to clipboard!');
+      }, () => {
+        alert('Failed to copy link.');
+      });
+    } else {
+      // fallback
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        alert('Link copied to clipboard!');
+      } catch {
+        alert('Failed to copy link.');
+      }
+      document.body.removeChild(textarea);
+    }
+  }
+
+  function renderTrackedLinks() {
+    const links = loadTrackingLinks();
+    if (Object.keys(links).length === 0) {
+      trackedLinksList.innerHTML = '<p class="message">No tracking links created yet.</p>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Tracking Link</th><th>Destination URL</th><th>Date Created</th><th>Visits</th></tr></thead><tbody>';
+    for (const id in links) {
+      const link = baseUrl + '?id=' + encodeURIComponent(id);
+      const created = humanDate(links[id].created);
+      const visits = links[id].visits || [];
+      const destUrl = links[id].destinationUrl || '';
+      html += '<tr><td><a href="' + link + '" target="_blank" rel="noopener" class="tracking-link">' + link + '</a>';
+      html += '<a href="#" class="copy-btn" data-link="' + link + '">Copy</a></td>';
+      html += '<td><a href="' + escapeHtml(destUrl) + '" target="_blank" rel="noopener">' + escapeHtml(destUrl) + '</a></td>';
+      html += '<td>' + created + '</td>';
+      html += '<td>' + visits.length + '</td></tr>';
+      if (visits.length > 0) {
+        html += '<tr><td colspan="4"><table><thead><tr><th>Time</th><th>Latitude</th><th>Longitude</th><th>Accuracy (m)</th></tr></thead><tbody>';
+        visits.forEach(visit => {
+          html += '<tr><td>' + humanDate(visit.timestamp) + '</td><td>' + visit.latitude.toFixed(5) + '</td><td>' + visit.longitude.toFixed(5) + '</td><td>' + visit.accuracy.toFixed(1) + '</td></tr>';
+        });
+        html += '</tbody></table></td></tr>';
+      }
+    }
+    html += '</tbody></table>';
+    trackedLinksList.innerHTML = html;
+
+    // Add copy link button listeners
+    const copyButtons = trackedLinksList.querySelectorAll('.copy-btn');
+    copyButtons.forEach(btn => {
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        const link = btn.getAttribute('data-link');
+        copyToClipboard(link);
+      });
+    });
+  }
+
+  // Simple HTML escape helper
+  function escapeHtml(text) {
+    if (!text) return '';
+    return text.replace(/&/g, '&amp;')
+               .replace(/</g, '&lt;')
+               .replace(/>/g, '&gt;')
+               .replace(/"/g, '&quot;')
+               .replace(/'/g, '&#039;');
+  }
+
+  function createNewTrackingLink() {
+    inputError.style.display = 'none';
+    const url = destinationUrlInput.value.trim();
+    if (!url) {
+      inputError.textContent = 'Please enter a destination URL.';
+      inputError.style.display = 'block';
+      return;
+    }
+    if (!isValidUrl(url)) {
+      inputError.textContent = 'Invalid URL format. Please enter a valid http or https URL.';
+      inputError.style.display = 'block';
+      return;
+    }
+    const links = loadTrackingLinks();
+
+    // Check if URL already tracked: if yes, don't create duplicates, just show existing link
+    let existingId = null;
+    for (const k in links) {
+      if (links[k].destinationUrl === url) {
+        existingId = k;
+        break;
+      }
+    }
+    let newId;
+    if (existingId) {
+      newId = existingId;
+    } else {
+      newId = generateId(10);
+      links[newId] = { created: Date.now(), destinationUrl: url, visits: [] };
+      saveTrackingLinks(links);
+    }
+    renderTrackedLinks();
+    newLinkContainer.innerHTML = '<p>Tracking link for <a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a> created:' +
+      ' <span class="tracking-link">' + baseUrl + '?id=' + newId + '</span>' +
+      ' <a href="#" class="copy-btn" data-link="' + baseUrl + '?id=' + newId + '">Copy</a></p>';
+    const copyBtn = newLinkContainer.querySelector('.copy-btn');
+    copyBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      copyToClipboard(copyBtn.getAttribute('data-link'));
+    });
+  }
+
+  //-----------------------------
+  // Initialization
+  //-----------------------------
+  if (trackingId) {
+    // Show tracking page
+    runTracker(trackingId);
+  } else {
+    // Show creator page
+    creatorView.style.display = 'block';
+    renderTrackedLinks();
+
+    createLinkBtn.addEventListener('click', function(){
+      createNewTrackingLink();
+    });
+  }
+
+})();
+</script>
+<div class="footer">This site demonstrates tracking link conversion with visitor location collection stored locally in your browser. Visitors will be asked permission to share their location before redirect.</div>
+</body>
+</html>
+
+```
+
